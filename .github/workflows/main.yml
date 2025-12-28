@@ -1,9 +1,7 @@
-name: Windows 11 RDP (Tailscale)
+name: Windows 11 RDP via Tailscale
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 
 jobs:
   rdp:
@@ -11,10 +9,11 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Create RDP User
+        shell: powershell
         run: |
           net user $env:RDP_USER $env:RDP_PASS /add
           net localgroup administrators $env:RDP_USER /add
@@ -22,27 +21,29 @@ jobs:
           RDP_USER: ${{ secrets.RDP_USER }}
           RDP_PASS: ${{ secrets.RDP_PASS }}
 
-      - name: Enable RDP
+      - name: Enable Remote Desktop
+        shell: powershell
         run: |
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
       - name: Install Tailscale
+        shell: powershell
         run: |
-          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile tailscale.exe
-          Start-Process tailscale.exe -ArgumentList "/S" -Wait
+          choco install tailscale -y
 
       - name: Connect to Tailscale
+        shell: powershell
         run: |
-          "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TS_AUTHKEY --hostname github-rdp
+          tailscale up --authkey $env:TS_AUTHKEY --hostname github-windows-rdp
         env:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
 
       - name: Show Tailscale IP
         run: |
-          "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          tailscale ip -4
 
-      - name: Keep session alive
+      - name: Keep Session Alive
         run: |
-          echo "RDP READY"
+          echo "RDP READY — DO NOT CLOSE"
           ping -t 127.0.0.1
