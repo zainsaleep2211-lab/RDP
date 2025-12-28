@@ -1,17 +1,48 @@
-name: Basic CI
+name: Windows 11 RDP (Tailscale)
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
 
 jobs:
-  test:
+  rdp:
     runs-on: windows-latest
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Hello world
-        run: echo "Workflow is running!"
+      - name: Create RDP User
+        run: |
+          net user $env:RDP_USER $env:RDP_PASS /add
+          net localgroup administrators $env:RDP_USER /add
+        env:
+          RDP_USER: ${{ secrets.RDP_USER }}
+          RDP_PASS: ${{ secrets.RDP_PASS }}
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Install Tailscale
+        run: |
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile tailscale.exe
+          Start-Process tailscale.exe -ArgumentList "/S" -Wait
+
+      - name: Connect to Tailscale
+        run: |
+          "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TS_AUTHKEY --hostname github-rdp
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Show Tailscale IP
+        run: |
+          "C:\Program Files\Tailscale\tailscale.exe" ip -4
+
+      - name: Keep session alive
+        run: |
+          echo "RDP READY"
+          ping -t 127.0.0.1
