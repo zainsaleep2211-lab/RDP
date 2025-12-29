@@ -1,4 +1,4 @@
-name: Windows 11 RDP via Tailscale
+name: Windows11RSP
 
 on:
   workflow_dispatch:
@@ -6,44 +6,124 @@ on:
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      # ------------------------
+      # Enable Remote Desktop
+      # ------------------------
+      - name: Enable RDP + Firewall Rules
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+              -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Disable NLA (optional but required for easier RDP)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+              -Name "UserAuthentication" -Value 0 -Force
 
+          # Allow RDP port
+          netsh advfirewall firewall delete rule name="RDP-Allow" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      # ------------------------
+      # Create Local RDP User
+      # ------------------------
       - name: Create RDP User
-        shell: powershell
         run: |
-          net user $env:RDP_USER $env:RDP_PASS /add
-          net localgroup administrators $env:RDP_USER /add
-        env:
-          RDP_USER: ${{ secrets.RDP_USER }}
-          RDP_PASS: ${{ secrets.RDP_PASS }}
+          Add-Type -AssemblyName System.Security
+          $u = 4; $l = 4; $n = 4; $s = 4
 
-      - name: Enable Remote Desktop
-        shell: powershell
-        run: |
-          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $charSet = @{
+            Upper   = [char[]](65..90)
+            Lower   = [char[]](97..122)
+            Number  = [char[]](48..57)
+            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          }
 
+          $raw = @()
+          $raw += $charSet.Upper   | Get-Random -Count $u
+          $raw += $charSet.Lower   | Get-Random -Count $l
+          $raw += $charSet.Number  | Get-Random -Count $n
+          $raw += $charSet.Special | Get-Random -Count $s
+
+          $password = -join ($raw | Sort-Object { Get-Random })
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+
+          New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      # ------------------------
+      # Install Tailscale
+      # ------------------------
       - name: Install Tailscale
-        shell: powershell
         run: |
-          choco install tailscale -y
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
 
-      - name: Connect to Tailscale
-        shell: powershell
-        run: |
-          tailscale up --authkey $env:TS_AUTHKEY --hostname github-windows-rdp
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer
 
-      - name: Show Tailscale IP
-        run: |
-          tailscale ip -4
+          Start-Process msiexec.exe `
+            -ArgumentList "/i `"$installer`" /quiet /norestart" `
+            -Wait
 
-      - name: Keep Session Alive
+          Remove-Item $installer -Force
+
+      # ------------------------
+      # Connect to Tailscale
+      # ------------------------
+      - name: Connect Tailscale
         run: |
-          echo "RDP READY — DO NOT CLOSE"
-          ping -t 127.0.0.1
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-win11-${env:GITHUB_RUN_ID}
+
+          $tsIP = ""
+          for ($i=0; $i -lt 10; $i++) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            if ($tsIP) { break }
+            Start-Sleep 5
+          }
+
+          if (-not $tsIP) {
+            Write-Error "Tailscale failed to obtain an IP."
+            exit 1
+          }
+
+          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+
+      # ------------------------
+      # Connectivity Test
+      # ------------------------
+      - name: Test RDP Port
+        run: |
+          $result = Test-NetConnection -ComputerName $env:TS_IP -Port 3389
+          if (-not $result.TcpTestSucceeded) {
+            Write-Error "Port 3389 is NOT accessible."
+            exit 1
+          }
+          Write-Host "RDP port is open!"
+
+      # ------------------------
+      # Final Output + Keep Alive
+      # ------------------------
+      - name: Keep Runner Alive
+        run: |
+          Write-Host "=============================="
+          Write-Host "     WINDOWS 11 RDP ACTIVE    "
+          Write-Host "=============================="
+          Write-Host "Connect Using:"
+          Write-Host "Tailscale IP : $env:TS_IP"
+          Write-Host "Username     : RDP"
+          Write-Host "Password     : $env:RDP_PASS"
+          Write-Host "=============================="
+
+          while ($true) {
+            Write-Host "[KEEP-ALIVE] $(Get-Date)"
+            Start-Sleep -Seconds 300
+          }
+
